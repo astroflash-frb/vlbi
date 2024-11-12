@@ -12,7 +12,7 @@ Optional:
     -v  Display the version of the program.
 
 
-Version: 3.0a1
+Version: 3.0
 Author: Benito Marcote (marcote@jive.eu)
 
 
@@ -43,7 +43,7 @@ from casatools import measures as me
 from funcs import chunkert, mjd2date
 
 
-__version__ = '3.0a1'
+__version__ = '3.0'
 
 
 class Source(object):
@@ -573,6 +573,7 @@ def main():
     mspath = arguments.msdata[:-1] if arguments.msdata[-1]=='/' else arguments.msdata
     ms = Experiment(mspath, ignore_check=arguments.ignore)
     ms.print_blessed()
+
 
 if __name__ == '__main__':
     main()
