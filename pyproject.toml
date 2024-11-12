@@ -11,5 +11,6 @@ readme = "README.md"
 requires-python = ">=3.8"
 
 [project.scripts]
-tool1 = "vlbi.delay_mapping:main"
-tool2 = "vlbi.msoverview:main"
+delay_mapping = "vlbi.delay_mapping:main"
+msoverview = "vlbi.msoverview:main"
+fix_difmap_image = "vlbi.fix_difmap_image:main"
