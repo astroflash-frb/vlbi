@@ -12,12 +12,14 @@ Optional:
     -v  Display the version of the program.
 
 
-Version: 2.2.1
+Version: 3.0a1
 Author: Benito Marcote (marcote@jive.eu)
 
 
+version 3.0 changes (Nov 2024)
+- Moved from pyrap/casacore to casatools.
 version 2.2.1 changes (Jul 2023)
-- chunkert chunk value changed to 100 (optimal IO speed)
+- chunkert chunk value changed to 100 (optimal IO speed).
 version 2.2 (Nov 2022)
 """
 import os
@@ -29,23 +31,19 @@ import argparse
 from pathlib import Path
 from dataclasses import dataclass
 from collections import defaultdict
-from pyrap import tables as pt
 from astropy import units as u
 from astropy import coordinates as coord
 from rich import progress
 import blessed
+# from pyrap import tables as pt
+from casatools import msmetadata as msmd
+from casatools import table as tb
+from casatools import quanta as qa
+from casatools import measures as me
+from .funcs import chunkert
 
 
-
-__version__ = '2.2.2'
-
-def chunkert(f, l, cs):
-    while f<l:
-        n = min(cs, l-f)
-        yield (f, n)
-        f = f + n
-
-percent = lambda x, y: (float(x)/float(y))*100.0
+__version__ = '3.0a1'
 
 
 class Source(object):
@@ -343,59 +341,73 @@ class Experiment(object):
         from all existing passes with MS files and incorporate them into the current object.
         """
         try:
-            with pt.table(self.msname, readonly=True, ack=False) as ms:
-                with pt.table(ms.getkeyword('ANTENNA'), readonly=True, ack=False) as ms_ant:
-                    antenna_col = ms_ant.getcol('NAME')
-                    for ant_name in antenna_col:
-                        ant = Antenna(name=ant_name, observed=True)
-                        self._antennas.add(ant)
+            tb_tool = tb()
+            msmd_tool = msmd()
+            qa_tool = qa()
+            me_tool = me()
 
-                with pt.table(ms.getkeyword('DATA_DESCRIPTION'), readonly=True, ack=False) as ms_spws:
-                    spw_names = ms_spws.getcol('SPECTRAL_WINDOW_ID')
+            tb_tool.open(self.msname, nomodify=True)
+            msmd_tool.open(self.msname)
 
-                if not self.ignore_check:
-                    ant_subband = defaultdict(set)
-                    print('\nReading the MS to find the antennas that actually observed...')
-                    with progress.Progress() as progress_bar:
-                        task = progress_bar.add_task("[yellow]Reading MS...", total=len(ms))
-                        for (start, nrow) in chunkert(0, len(ms), 100):
-                            ants1 = ms.getcol('ANTENNA1', startrow=start, nrow=nrow)
-                            ants2 = ms.getcol('ANTENNA2', startrow=start, nrow=nrow)
-                            spws = ms.getcol('DATA_DESC_ID', startrow=start, nrow=nrow)
-                            msdata = ms.getcol('DATA', startrow=start, nrow=nrow)
+            # Get antenna names
+            antenna_names = msmd_tool.antennanames()
+            for ant_name in antenna_names:
+                ant = Antenna(name=ant_name, observed=True)
+                self._antennas.add(ant)
 
-                            for ant_i,antenna_name in enumerate(antenna_col):
-                                for spw in spw_names:
-                                    cond = np.where((ants1 == ant_i) & (ants2 == ant_i) & (spws == spw))
-                                    if not (abs(msdata[cond]) < 1e-5).all():
-                                        ant_subband[antenna_name].add(spw)
+            # Get spectral window info
+            spw_ids = msmd_tool.spwids()
 
-                            progress_bar.update(task, advance=nrow)
+            if not self.ignore_check:
+                ant_subband = defaultdict(set)
+                print('\nReading the MS to find the antennas that actually observed...')
+                with progress.Progress() as progress_bar:
+                                    task = progress_bar.add_task("[yellow]Reading MS...", total=tb_tool.nrows())
+                    for (start, nrow) in chunkert(0, tb_tool.nrows(), 100):
+                        ants1 = tb_tool.getcol('ANTENNA1', startrow=start, nrow=nrow)
+                        ants2 = tb_tool.getcol('ANTENNA2', startrow=start, nrow=nrow)
+                        spws = tb_tool.getcol('DATA_DESC_ID', startrow=start, nrow=nrow)
+                        msdata = tb_tool.getcol('DATA', startrow=start, nrow=nrow)
 
-                    for antenna_name in self.antennas.names:
-                        self._antennas[antenna_name].subbands = tuple(ant_subband[antenna_name])
-                        self._antennas[antenna_name].observed = len(self._antennas[antenna_name].subbands) > 0
-                else:
-                    for antenna_name in self.antennas.names:
-                        self._antennas[antenna_name].subbands = spw_names
-                        self._antennas[antenna_name].observed = True
+                        for ant_i,antenna_name in enumerate(antenna_names):
+                            for spw in spw_ids:
+                                cond = np.where((ants1 == ant_i) & (ants2 == ant_i) & (spws == spw))
+                                if not (abs(msdata[cond]) < 1e-5).all():
+                                    ant_subband[antenna_name].add(spw)
 
-                with pt.table(ms.getkeyword('FIELD'), readonly=True, ack=False) as ms_field:
-                    src_names = ms_field.getcol('NAME')
-                    src_coords = ms_field.getcol('PHASE_DIR')
-                    for a_name, a_coord in zip(src_names, src_coords):
-                        self.sources.append(Source(a_name, coord.SkyCoord(*a_coord[0], unit=(u.rad, u.rad))))
+                        progress_bar.update(task, advance=nrow)
 
-                with pt.table(ms.getkeyword('OBSERVATION'), readonly=True, ack=False) as ms_obs:
-                    self.timerange = dt.datetime(1858, 11, 17, 0, 0, 2) + \
-                         ms_obs.getcol('TIME_RANGE')[0]*dt.timedelta(seconds=1)
+                for antenna_name in self.antennas.names:
+                    self._antennas[antenna_name].subbands = tuple(ant_subband[antenna_name])
+                    self._antennas[antenna_name].observed = len(self._antennas[antenna_name].subbands) > 0
+            else:
+                for antenna_name in self.antennas.names:
+                    self._antennas[antenna_name].subbands = spw_ids
+                    self._antennas[antenna_name].observed = True
 
-                with pt.table(ms.getkeyword('SPECTRAL_WINDOW'), readonly=True, ack=False) as ms_spw:
-                    self._freqsetup = Subbands(ms_spw.getcol('NUM_CHAN')[0],
-                                                ms_spw.getcol('CHAN_FREQ'),
-                                                ms_spw.getcol('TOTAL_BANDWIDTH')[0])
-        except RuntimeError:
-            print(f"WARNING: {self.msname} not found.")
+            # Get source information
+            source_names = msmd_tool.fieldnames()
+            source_coords = msmd_tool.phasecenter()
+            for name, coord in zip(source_names, source_coords):
+                ra, dec = coord['m0']['value'], coord['m1']['value']
+                self.sources.append(Source(name, coord.SkyCoord(ra, dec, unit=(u.rad, u.rad))))
+
+            # Get time range
+            time_range = msmd_tool.timerangeforobs(0)
+            self.timerange = [qa_tool.time(qa_tool.quantity(t, 's'), form='ymd')[0] for t in time_range]
+
+            # Get frequency setup
+            spw_info = msmd_tool.spwinfo(spw_ids[0])
+            self._freqsetup = Subbands(spw_info['numchan'], spw_info['chan_freq'], spw_info['totalbandwidth'])
+
+        except RuntimeError as e:
+            print(f"WARNING: {self.msname} not found: {str(e)}.")
+        except Exception as e:
+            print(f"WARNING: Error processing {self.msname}: {str(e)}")
+        finally:
+            tb_tool.close()
+            msmd_tool.close()
+
 
     def store(self, path=None):
         """Stores the current Experiment into a file in the indicated path. If not provided,
