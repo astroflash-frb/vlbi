@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vlbi"
+version = "0.1.0"
+description = "A collection of useful tools for VLBI data"
+authors = [{name = "Benito Marcote", email = "marcote@jive.eu"}]
+readme = "README.md"
+requires-python = ">=3.8"
+
+[project.scripts]
+tool1 = "vlbi.delay_mapping:main"
+tool2 = "vlbi.msoverview:main"
