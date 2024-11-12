@@ -40,7 +40,7 @@ from casatools import msmetadata as msmd
 from casatools import table as tb
 from casatools import quanta as qa
 from casatools import measures as me
-from .funcs import chunkert
+from funcs import chunkert, mjd2date
 
 
 __version__ = '3.0a1'
@@ -356,13 +356,13 @@ class Experiment(object):
                 self._antennas.add(ant)
 
             # Get spectral window info
-            spw_ids = msmd_tool.spwids()
+            spw_ids = range(msmd_tool.nspw())
 
             if not self.ignore_check:
                 ant_subband = defaultdict(set)
                 print('\nReading the MS to find the antennas that actually observed...')
                 with progress.Progress() as progress_bar:
-                                    task = progress_bar.add_task("[yellow]Reading MS...", total=tb_tool.nrows())
+                    task = progress_bar.add_task("[yellow]Reading MS...", total=tb_tool.nrows())
                     for (start, nrow) in chunkert(0, tb_tool.nrows(), 100):
                         ants1 = tb_tool.getcol('ANTENNA1', startrow=start, nrow=nrow)
                         ants2 = tb_tool.getcol('ANTENNA2', startrow=start, nrow=nrow)
@@ -372,7 +372,7 @@ class Experiment(object):
                         for ant_i,antenna_name in enumerate(antenna_names):
                             for spw in spw_ids:
                                 cond = np.where((ants1 == ant_i) & (ants2 == ant_i) & (spws == spw))
-                                if not (abs(msdata[cond]) < 1e-5).all():
+                                if not (abs(msdata[:,:,cond]) < 1e-5).all():
                                     ant_subband[antenna_name].add(spw)
 
                         progress_bar.update(task, advance=nrow)
@@ -387,23 +387,26 @@ class Experiment(object):
 
             # Get source information
             source_names = msmd_tool.fieldnames()
-            source_coords = msmd_tool.phasecenter()
-            for name, coord in zip(source_names, source_coords):
-                ra, dec = coord['m0']['value'], coord['m1']['value']
-                self.sources.append(Source(name, coord.SkyCoord(ra, dec, unit=(u.rad, u.rad))))
+
+            # for a_name, a_coord in zip(source_names, source_coords):
+            for src_id, src_name in enumerate(source_names):
+                src_coord = msmd_tool.phasecenter(src_id)
+                ra, dec = src_coord['m0']['value'], src_coord['m1']['value']
+                self.sources.append(Source(src_name, coord.SkyCoord(ra, dec, unit=(u.rad, u.rad))))
 
             # Get time range
             time_range = msmd_tool.timerangeforobs(0)
-            self.timerange = [qa_tool.time(qa_tool.quantity(t, 's'), form='ymd')[0] for t in time_range]
+            self.timerange = [mjd2date(time_range['begin']['m0']['value']), mjd2date(time_range['end']['m0']['value'])]
+            self._obsdate = self.timerange[0].date()
 
             # Get frequency setup
-            spw_info = msmd_tool.spwinfo(spw_ids[0])
-            self._freqsetup = Subbands(spw_info['numchan'], spw_info['chan_freq'], spw_info['totalbandwidth'])
-
-        except RuntimeError as e:
-            print(f"WARNING: {self.msname} not found: {str(e)}.")
-        except Exception as e:
-            print(f"WARNING: Error processing {self.msname}: {str(e)}")
+            spw_info = msmd_tool.nchan(0)
+            self._freqsetup = Subbands(msmd_tool.nchan(0), np.array([msmd_tool.chanfreqs(sb, 'Hz') for sb in spw_ids]),
+                                       np.sum(msmd_tool.bandwidths()/len(spw_ids)))
+        # except RuntimeError as e:
+        #     print(f"WARNING: {self.msname} not found: {str(e)}.")
+        # except Exception as e:
+        #     print(f"WARNING: Error processing {self.msname}: {str(e)}")
         finally:
             tb_tool.close()
             msmd_tool.close()
@@ -516,20 +519,20 @@ class Experiment(object):
 
             s += '\n'
             s += term.bold_green('ANTENNAS\n')
-            s += term.bright_black('Observed antennas: ') + \
+            s += term.bright_black('Observed: ') + \
                  f"{', '.join([ant.name for ant in self.antennas if ant.observed])}\n"
             missing_ants = [ant.name for ant in self.antennas if not ant.observed]
             s += term.bright_black('Did not observe: ') + \
                  f"{', '.join(missing_ants) if len(missing_ants) > 0 else 'None'}\n\n"
 
             # In case of antennas not observing the full bandwidth (this may be per correlator pass)
-            ss = ""
-            for antenna in self.antennas:
-                if 0 < len(antenna.subbands) < self.freqsetup.n_subbands:
-                    ss += f"    {antenna.name}: {antenna.subbands}\n"
-
-            if ss != "":
-                s += term.bright_black('Antennas with smaller bandwidth:\n') + ss
+            if any([0 < len(ant.subbands) < self.freqsetup.n_subbands for ant in self.antennas]):
+                s += term.bright_black('Observed subbands per antenna (starting in 0):\n')
+                for antenna in self.antennas:
+                    if antenna.observed:
+                        s += f"    {antenna.name}:  {' '*(3*(antenna.subbands[0]))}{antenna.subbands}\n"
+            else:
+                s += term.bright_black('All antennas observed the full bandwidth of the observation.\n')
 
             s_final = term.wrap(s, width=term.width)
 
