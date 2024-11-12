@@ -77,12 +77,31 @@ def chunkert(counter: int, max_length: int, increment: int) -> Generator[Iterabl
 
 
 def mjd2date(mjd: float) -> datetime.datetime:
-    """Returns the datetime for the given MJD date.
+    """Converts a Modified Julian Date (MJD) into a Python datetime object.
+
+    Inputs
+        mjd : float
+            The given Modified Julian Date (MJD) to convert.
+
+    Returns:  datetime.datetime
+        Python datetime object with the date given by mjd.
     """
     origin = datetime.datetime(1858, 11, 17)
     return origin + datetime.timedelta(mjd)
 
 
+def date2mjd(epoch: datetime.datetime) -> float:
+    """Converts a given datetime object into a float with the corresponding Modified Julian Date (MJD).
+
+    Inputs
+        epoch : datetime.datetime
+            Python datetime object with the date and time of a given epoch.
+
+    Returns:  float
+            The given Modified Julian Date (MJD) to convert.
+    """
+    origin = datetime.datetime(1858, 11, 17)
+    return  (epoch - origin).days + (epoch - origin).seconds/86400.0
 
 
 
