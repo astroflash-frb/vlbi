@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2",
+            "matplotlib", "numpy", "rich", "astropy", "casatools", "blessed"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,6 +12,6 @@ readme = "README.md"
 requires-python = ">=3.8"
 
 [project.scripts]
-delay_mapping = "vlbi.delay_mapping:main"
+delay_mapping = "vlbi.delay_mapping:cli"
 msoverview = "vlbi.msoverview:main"
 fix_difmap_image = "vlbi.fix_difmap_image:main"
