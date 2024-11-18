@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vlbi"
-version = "0.1.0"
+version = "1.0"
 description = "A collection of useful tools for VLBI data"
 authors = [{name = "Benito Marcote", email = "marcote@jive.eu"}]
 readme = "README.md"
