@@ -3,7 +3,11 @@
 import os
 import sys
 import argparse
+from itertools import product
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from matplotlib import pyplot as plt
+from matplotlib import colors
+from matplotlib.cm import ScalarMappable
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Optional, Union #, Iterable, Generator
@@ -16,6 +20,7 @@ from astropy import units as u
 from astropy.io import ascii
 from casatools import msmetadata as msmd
 from casatools import table as tb
+from casatools import logsink, logger
 from vlbi import funcs
 
 
@@ -65,7 +70,7 @@ def create_project_structure(project_code: str, path: Optional[str] = None):
 
     # Create subdirectories
     os.makedirs(os.path.join(project_dir, 'plots'), exist_ok=True)
-    os.makedirs(os.path.join(project_dir, 'results'), exist_ok=True)
+    # os.makedirs(os.path.join(project_dir, 'results'), exist_ok=True)
     return project_dir
 
 
@@ -87,13 +92,12 @@ def print_ms(msinfo: MSinfo, saveto: Optional[str] = None, silence: bool = False
     s += f"[bold]Setup:[/bold] {len(msinfo.subbands)} x {msinfo.bandwidth.to(u.MHz):.0f} subbands, " \
          f"{msinfo.channels} channels each.\n"
     s += f"[bold]Central frequency:[/bold] {msinfo.freq_central.to(u.GHz):.3f}\n"   # type: ignore
-    s += f"[bold]Antennas & subbands[/bold] (starting in zero):\n"
+    s += "[bold]Antennas & subbands[/bold] (starting in zero):\n"
     for ant in msinfo.antennas:
         if len(ant.subbands) > 0:
             s += f"    {ant.name}: {' '*(3*(ant.subbands[0]))}{ant.subbands}\n"
         else:
-            s += f"    {ant.name}: ---\n"
-
+            s += f"    {ant.name}:  {'---'*len(msinfo.subbands)}\n"
 
     if not silence:
         rprint(s + "\n\n")
@@ -151,9 +155,9 @@ def get_ms_metadata(msfile: str, chunks: int = 100):
         # print(f"{corr_order=}, {m.corrtypesforpol(0)=}, {corr_pos=}")
         ms['polarizations'] = corr_pos
         ms['phase-centers'] = m.phasecenter()
-        ms['freq_central'] = u.Quantity(((m.meanfreq(ms['subbands'][-1]) + m.meanfreq(0)) / 2.0), u.Hz).to(u.GHz)
+        ms['freq_central'] = u.Quantity(((m.meanfreq(ms['subbands'][-1]) + m.meanfreq(0)) / 2.0), u.Hz).to(u.GHz) # type: ignore
         ms['channels'] = m.nchan(0)
-        ms['bandwidth'] = (m.bandwidths()[0]*u.Hz).to(u.MHz)
+        ms['bandwidth'] = (m.bandwidths()[0]*u.Hz).to(u.MHz)  # type: ignore
     finally:
         m.close()
 
@@ -197,7 +201,6 @@ def get_ms_metadata(msfile: str, chunks: int = 100):
             sys.exit(1)
 
         ms['field'] = tuple(ms['field'])[0]
-
         ms['source'] = src_names[ms['field']]  # noqa - type: ignore
         src_coords = ms['phase-centers']  # dummy as phasecenter() only reports one coordinates
         ms['coordinates'] = coord.SkyCoord(ra=src_coords['m0']['value'], dec=src_coords['m1']['value'],
@@ -211,7 +214,7 @@ def get_ms_metadata(msfile: str, chunks: int = 100):
 
 
 
-def delay_snr(phases, weights, freq_resolution: float, padding: int = 8):
+def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8):
     """Computes the lag spectrum for the given data belonging to a single baseline and single polarization
 
     Inputs
@@ -219,8 +222,8 @@ def delay_snr(phases, weights, freq_resolution: float, padding: int = 8):
             The phases as obtained from the DATA column in the MS. Flagged data should have already been removed.
         weights : (shape = Nvisibilities)
             The weights associated with the previous data.
-        freq_resolution : float
-            The frequency resolution of each spectral channel in the data, in Hz.
+        bandwidth_sb: float
+            The bandwidth of a subband, in Hz.
 
     Returns
         lags : 1D np.array
@@ -258,7 +261,8 @@ def delay_snr(phases, weights, freq_resolution: float, padding: int = 8):
     snr_p = (np.pow(np.tan(x), 1.163) * np.sqrt(sum_weights/np.sqrt(sum_weights2/xcount)))
 
     # Calculating delay
-    delay_p = (lags_offset_p/n_pad) / freq_resolution
+    # delay_p = (lags_offset_p/n_pad) / freq_resolution
+    delay_p = lags_offset_p / (2*bandwidth_sb)
     assert all([isinstance(q, float) for q in (snr_p, delay_p, lags_offset_p)]), \
            f"They all should be floats but are {snr_p=}, {delay_p=}, {lags_offset_p=}"
     return lags, lag_spec, snr_p, delay_p, lags_offset_p
@@ -298,11 +302,11 @@ def plot_lags(data: dict, refant: str, baseline: str, subband: int,
         ax.plot(data[pol]['lags'], data[pol]['lag_spec'], label=pol.upper())
 
     ax.annotate("Lag offset: " + " ".join([f"{pol.upper()}: {data[pol]['lags_offset_p']:.2f}" for pol in data]),
-                xy=(0.55, 0.8), xycoords='axes fraction', fontsize=10)
+                xy=(0.55, 0.8), xycoords='axes fraction', fontsize=10, label='_label-lag')
     ax.annotate("SNR: " + " ".join([f"{pol.upper()}: {data[pol]['snr_p']:.2f}" for pol in data]),
-                xy=(0.55, 0.9), xycoords='axes fraction', fontsize=10)
+                xy=(0.55, 0.9), xycoords='axes fraction', fontsize=10, label='_label-snr')
     ax.annotate("Delay: " + " ".join([f"{pol.upper()}: {data[pol]['delay_p']:.2e}" for pol in data]),
-                xy=(0.55, 0.7), xycoords='axes fraction', fontsize=10)
+                xy=(0.55, 0.7), xycoords='axes fraction', fontsize=10, label='_label-delay')
     # ax.set_xlabel(f"")
     ax.legend(loc=2)
     if tosave:
@@ -312,18 +316,28 @@ def plot_lags(data: dict, refant: str, baseline: str, subband: int,
             data2write[f"Lag_spec_{pol}"] = data[pol]['lag_spec']
 
         ascii.write(data2write, f"{'.' if path is None else path}/lag_spectrum_{refant}-{baseline}_SB" \
-                        f"{str(subband)}.txt")
+                        f"{str(subband)}.txt", overwrite=True)
         if isinstance(tosave, str):
             fig.savefig(tosave, bbox_inches=0.001, pad_inches='tight')
         else:
+            # def exec_savefig(ext)# :
+            #     return fig.savefig(f"{'.' if path is None else path}/lag_spectrum_{refant}-{baseline}_SB" \
+            #                 f"{str(subband)}.{ext}", bbox_inches='tight', pad_inches=0.001)
+            #
+            # with ThreadPoolExecutor() as executor:
+            #     executor.map(exec_savefig, ('png', 'pdf'))
+            # Saving both PDF and PNG so the plots are useful in both PDF format and for the html file
             for ext in ('png', 'pdf'):
-                # Saving both PDF and PNG so the plots are useful in both PDF format and for the html file
                 fig.savefig(f"{'.' if path is None else path}/lag_spectrum_{refant}-{baseline}_SB" \
                             f"{str(subband)}.{ext}", bbox_inches='tight', pad_inches=0.001)
 
 
+def execute_plot_lags(args):
+    return plot_lags(*args)
+
+
 def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None, snr: int = 7,
-         spw: Optional[list[int]] = None, padding: int = 8, verbose: bool = True):
+         spw: Optional[list[int]] = None, padding: int = 8, verbose: bool = True, skip_plots: bool = False):
     """Runs delay mapping on a calibrated Ms dataset.
     It will produce a .html file with all lag plots for the different baselines and subbands/polarizations.
     Retuns the a-priori position of the given source and the individual delays calculated from the lag space.
@@ -346,11 +360,16 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
             Padding factor for the FFT in the lag space.
         verbose : bool  (default True)
             If True, then it will print in terminal the metadata from the read MS. Otherwise it will go silent.
+        skip_plots : bool  (default False)
+            If true, it will not generate the plot files, only the html page.
+            Useful for example when then MS file has not changed, the plots were already generated, and it only
+            needs to create again the html page.
     """
-    dm_path = msfile.replace('.ms', '') + '.delay_mapping'
+    dm_path = msfile.replace('.ms', '') + '_delay_mapping'
     create_project_structure(dm_path)
+
     msinfo = get_ms_metadata(msfile)
-    print_ms(msinfo, saveto=dm_path + '/results/summary_ms.txt', silence=not verbose)
+    print_ms(msinfo, saveto=dm_path + '/summary_ms.txt', silence=not verbose)
 
     # Read all data from MS
     ms = tb(msfile)
@@ -382,6 +401,7 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
     antenna_names = [ant.name for ant in msinfo.antennas]
     lag_results: dict = {}
     results4file: dict = defaultdict(list)
+    plot_calls = []
     for basel in baselines:
         lag_results[basel] = {}
         for a_spw in spw:
@@ -395,7 +415,7 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
                 # if len(phases[pol,:, condition]) > 0:
                 if (phases[pol, :, condition] > 0.0).any():
                     results = delay_snr(phases[pol,:,condition].squeeze(), weights[pol,condition].squeeze(),
-                                        msinfo.freq_central.to(u.Hz).value, padding=padding)
+                                        msinfo.bandwidth.to(u.Hz).value, padding=padding) # type: ignore
                     lag_results[basel][a_spw][pol_str] = {key: result for result, key in \
                             zip(results, ('lags', 'lag_spec', 'snr_p', 'delay_p', 'lags_offset_p'))}
 
@@ -409,15 +429,115 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
                     results4file['delay'].append(lag_results[basel][a_spw][pol_str]['delay_p'])
                     results4file['lag_offset'].append(lag_results[basel][a_spw][pol_str]['lags_offset_p'])
 
-            plot_lags(lag_results[basel][a_spw], refant, basel, a_spw, tosave=True, path=dm_path + '/plots')
+            # plot_lags(lag_results[basel][a_spw], refant, basel, a_spw, tosave=True, path=dm_path + '/plots')
+            plot_calls.append( (lag_results[basel][a_spw], refant, basel, a_spw, True, dm_path + '/plots') )
+
     # In a parallel way:
+    if not skip_plots:
+        with ProcessPoolExecutor() as executor:
+        # with ThreadPoolExecutor() as executor:
+            executor.map(execute_plot_lags, plot_calls)
+
     # Compute lags
     # calculate delay and errors
 
-    ascii.write(results4file, dm_path + '/results/delays.txt', overwrite=True,
-                formats={'snr_p': '%3f', 'delay': '%.3e', 'lag_offset': '%n'})
+    ascii.write(results4file, dm_path + '/delays.txt', overwrite=True,
+                formats={'snr': '%3f', 'delay': '%.3e', 'lag_offset': '%.0f'})
     # create plots
+    write_html(lag_results, refant, spw, msinfo.polarizations_str, dm_path, msinfo)
     # create html with all results
+
+
+def write_html(lag_results: dict, refant: str, subbands: list[int], polarizations: list[str],
+               cwd: str, msinfo: MSinfo, outfilename: str = 'output.html'):
+    """Generates the html static page that will show up the results from the delay mapping.
+    """
+    cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=10), cmap='RdYlGn')
+    cmap = colors.ListedColormap(['darkred', 'red', 'lightgreen', 'green'])
+    norm = colors.BoundaryNorm(boundaries=[3,4,5,10], ncolors=cmap.N, clip=False)
+    cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=8), cmap=cmap)
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Delay Mapping Results</title>
+        <style>
+            table {
+                border-collapse: collapse;
+            }
+            td {
+                width: 4rem;
+                height: 50px;
+                text-align: center;
+                position: relative;
+            }
+            .popup td {
+                position: relative;
+            }
+            .popup td img{
+                position: absolute;
+                display: none;
+                z-index: 99;
+                top: 50px;
+                left: 50px;
+                height: 400px;
+            }
+            .popup td:hover img {
+                display: block;
+            }
+            small {margin-bottom: 1px;}
+            h3 {margin-bottom: 0px; margin-top: 2px;}
+            a {text-decoration: none;}
+        </style>
+    </head>
+    <body>
+    """
+    html += f"""<h2>Delay mapping for {msinfo.source}</h2>
+    <p>Observations at {msinfo.freq_central.to(u.GHz):.2f} using the phase center {msinfo.coordinates.to_string('hmsdms')}.</p>
+    """
+
+    html += """<div class="popup">
+        <table>
+            <tr>
+                <th></th>
+    """
+
+    for baseline in lag_results:
+        html += f"<th>{refant}-{baseline}</th>"
+
+    html += "</tr>"
+
+    for subband, pol in product(subbands, polarizations):
+        html += f"<tr><th>SB{subband}-{pol}</th>"
+        for baseline in lag_results:
+            if subband in lag_results[baseline] and pol in lag_results[baseline][subband]:
+                # print(f"\n\nkeys in lag_results: {lag_results.keys()=}\n{lag_results[baseline].keys()=}\n{lag_results[baseline][subband].keys()=}\n{lag_results[baseline][subband][pol].keys()=}")
+                snr = lag_results[baseline][subband][pol]['snr_p']
+                color = cmap.to_rgba(snr, norm=norm)
+                hex_color = '#{:02x}{:02x}{:02x}BB'.format(int(color[0]*255), int(color[1]*255), int(color[2]*255))
+                html += f"""<td style="background-color: {hex_color};">
+                        <a href="./plots/lag_spectrum_{refant.upper()}-{baseline.upper()}_SB{subband}.png">
+                        <img src="./plots/lag_spectrum_{refant.upper()}-{baseline.upper()}_SB{subband}.png"
+                         alt="Lag {refant}-{baseline} SB{subband}"><h3>{snr:.1f}</h3>
+                         <small>{lag_results[baseline][subband][pol]['delay_p']*1e6:.2f} us</small></a>
+                </td>
+                """
+            else:
+                html += "<td></td>"
+
+        html += "</tr>"
+
+    html += """
+        </table>
+        </div>
+    </body>
+    </html>
+    """
+
+    with open(f"{cwd}/{outfilename}" if cwd[-1] != '/' else f"{cwd}{outfilename}", 'w') as outhtml:
+        outhtml.write(html)
 
 
 def cli():
@@ -443,6 +563,8 @@ def cli():
                         help="Padding factor for the FFT in lag space.")
     parser.add_argument("-v", "--verbose", action="store_true", default=False,
                         help="Show MS information while running.")
+    parser.add_argument("--skip-plots", action="store_true", default=False,
+                        help="Show MS information while running.")
     # parser.add_argument("--snr", type=int, default=7,
     #                     help="The minimum SNR required to consider a significant fringe in the lag space.")
     args = parser.parse_args()
@@ -450,7 +572,11 @@ def cli():
         rprint(f"[bold red]\nThe given MS file ({args.msfile}) does not exist or cannot be found.[/bold red]")
         sys.exit(1)
 
-    main(args.msfile, args.refant, args.baselines, args.snr, args.spw, args.padding, verbose=args.verbose)
+    # print(logsink.logfile())
+    main(args.msfile, args.refant, args.baselines, args.snr, args.spw, args.padding, verbose=args.verbose,
+         skip_plots=args.skip_plots)
+    if logger is not None:
+        os.unlink(logger.logfile())
 
 
 if __name__ == '__main__':
