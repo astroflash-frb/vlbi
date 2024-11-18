@@ -4,7 +4,7 @@ import os
 import sys
 import argparse
 from itertools import product
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from matplotlib import pyplot as plt
 from matplotlib import colors
 from matplotlib.cm import ScalarMappable
@@ -15,12 +15,13 @@ from rich import print as rprint
 from rich import progress
 from rich_argparse import RichHelpFormatter
 import numpy as np
+from scipy.optimize import curve_fit
 from astropy import coordinates as coord
 from astropy import units as u
 from astropy.io import ascii
 from casatools import msmetadata as msmd
 from casatools import table as tb
-from casatools import logsink, logger
+from casatools import logger
 from vlbi import funcs
 
 
@@ -214,7 +215,7 @@ def get_ms_metadata(msfile: str, chunks: int = 100):
 
 
 
-def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8):
+def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8, snr_fit: float = 7.0):
     """Computes the lag spectrum for the given data belonging to a single baseline and single polarization
 
     Inputs
@@ -224,6 +225,10 @@ def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8):
             The weights associated with the previous data.
         bandwidth_sb: float
             The bandwidth of a subband, in Hz.
+        snr_fit : float  (defualt 7)
+            Minimum SNR to run a least square fit to the lag spectrum to get the central position and
+            uncertainty. If the SNR is lower, then it will only return the position of the peak in the lag
+            spectrum and zero uncertainty.
 
     Returns
         lags : 1D np.array
@@ -236,6 +241,9 @@ def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8):
             Delay at which the the peak in the lag spectrum is found.
         lags_offset_p : float
             Lag offset at which the peak in the lag spectrum is found.
+        lags_error_p : float
+            Uncertainty in the lag offset at which the peak in the lag spectrum is found.
+            If the SNR for this peak is lower than set in 'snr_fit', then the error is zero.
     """
     n_channels = phases.shape[0]
     # Makes a wider window to avoid FFT issues
@@ -260,12 +268,20 @@ def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8):
     x = lag_peak/xcount*np.pi/2.0
     snr_p = (np.pow(np.tan(x), 1.163) * np.sqrt(sum_weights/np.sqrt(sum_weights2/xcount)))
 
+    if snr_p > snr_fit:
+        popt, _ = curve_fit(gaussian_func, lags, lag_spec, p0=(lag_peak, lags_offset_p, 1.5))
+        lags_offset_p = popt[1]
+        lags_error_p = popt[2]
+    else:
+        lags_error_p = 0.0
+
     # Calculating delay
     # delay_p = (lags_offset_p/n_pad) / freq_resolution
     delay_p = lags_offset_p / (2*bandwidth_sb)
+    delay_error_p = lags_error_p / (2*bandwidth_sb)
     assert all([isinstance(q, float) for q in (snr_p, delay_p, lags_offset_p)]), \
            f"They all should be floats but are {snr_p=}, {delay_p=}, {lags_offset_p=}"
-    return lags, lag_spec, snr_p, delay_p, lags_offset_p
+    return lags, lag_spec, snr_p, delay_p, delay_error_p, lags_offset_p, lags_error_p
 
 
 def gaussian_func(x, norm: float, x0: float, sigma: float):
@@ -417,7 +433,8 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
                     results = delay_snr(phases[pol,:,condition].squeeze(), weights[pol,condition].squeeze(),
                                         msinfo.bandwidth.to(u.Hz).value, padding=padding) # type: ignore
                     lag_results[basel][a_spw][pol_str] = {key: result for result, key in \
-                            zip(results, ('lags', 'lag_spec', 'snr_p', 'delay_p', 'lags_offset_p'))}
+                            zip(results, ('lags', 'lag_spec', 'snr_p', 'delay_p', 'delay_error_p',
+                                          'lags_offset_p', 'lags_error_p'))}
 
                     results4file['antenna1'].append(refant)
                     results4file['antenna2'].append(basel)
@@ -427,22 +444,21 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
                     results4file['v'].append(np.mean(uvws[1, condition]))
                     results4file['snr'].append(lag_results[basel][a_spw][pol_str]['snr_p'])
                     results4file['delay'].append(lag_results[basel][a_spw][pol_str]['delay_p'])
+                    results4file['delay_error'].append(lag_results[basel][a_spw][pol_str]['delay_error_p'])
                     results4file['lag_offset'].append(lag_results[basel][a_spw][pol_str]['lags_offset_p'])
+                    results4file['lag_offset_error'].append(lag_results[basel][a_spw][pol_str]['lags_error_p'])
 
             # plot_lags(lag_results[basel][a_spw], refant, basel, a_spw, tosave=True, path=dm_path + '/plots')
             plot_calls.append( (lag_results[basel][a_spw], refant, basel, a_spw, True, dm_path + '/plots') )
 
-    # In a parallel way:
     if not skip_plots:
         with ProcessPoolExecutor() as executor:
-        # with ThreadPoolExecutor() as executor:
             executor.map(execute_plot_lags, plot_calls)
 
     # Compute lags
     # calculate delay and errors
-
     ascii.write(results4file, dm_path + '/delays.txt', overwrite=True,
-                formats={'snr': '%3f', 'delay': '%.3e', 'lag_offset': '%.0f'})
+                formats={'snr': '%3f', 'delay': '%.3e', 'delay_error': '%.2e','lag_offset': '%.1f', 'lag_offset_error': '%.1f'})
     # create plots
     write_html(lag_results, refant, spw, msinfo.polarizations_str, dm_path, msinfo)
     # create html with all results
