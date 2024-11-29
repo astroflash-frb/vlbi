@@ -18,6 +18,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from astropy import coordinates as coord
 from astropy import units as u
+from astropy import constants as const
 from astropy.io import ascii
 from casatools import msmetadata as msmd
 from casatools import table as tb
@@ -291,6 +292,39 @@ def gaussian_func(x, norm: float, x0: float, sigma: float):
     return norm*np.exp(-(x-x0)**2/(2*sigma**2))
 
 
+def angular_offset_from_delay(uv_u: Union[float, u.Quantity], uv_v: Union[float, u.Quantity],
+                              delay: Union[float, u.Quantity]):
+    """Given a delay offset for a given baseline (u, v), it returns the angular offset
+    (as measured in Delta alpha * cos(delta), Delta(delta)), that is implied from it.
+
+    Inputs
+        uv_u :  float or astropy.units.Quantity
+            'u' value for the baseline. If no units are provided, meters are assumed.
+        uv_v :  float or astropy.units.Quantity
+            'v' value for the baseline. If no units are provided, meters are assumed.
+        delay : float or astropy.units.Quantity
+            Delay offset measured in the given baseline. If no units are provided, seconds are assumed.
+
+    Returns
+        Delta alpha * cos(delta)  : astropy.units.Quantity
+            Angular offset in right ascension with respect to the phase center.
+        Delta delta  : astropy.units.Quantity
+            Angular offset in declination with respect to the phase center.
+    """
+    if isinstance(uv_u, float) or isinstance(uv_u, int):
+        uv_u = uv_u*u.m
+
+    if isinstance(uv_v, float) or isinstance(uv_v, int):
+        uv_v = uv_v*u.m
+
+    if isinstance(delay, float) or isinstance(delay, int):
+        delay = delay*u.second
+
+    angle = np.arctan2(uv_v, uv_u)
+    return (delay*u.rad*const.c*np.cos(angle)**2/uv_u).to(u.arcsec), \
+           (delay*u.rad*const.c*np.cos(angle)*np.sin(angle)/uv_u).to(u.arcsec)
+
+
 def plot_lags(data: dict, refant: str, baseline: str, subband: int,
               tosave: Union[str, bool] = False, path: Optional[str] = None):
     """Plots the lag spectrum for the given baseline, and subband.
@@ -468,10 +502,10 @@ def write_html(lag_results: dict, refant: str, subbands: list[int], polarization
                cwd: str, msinfo: MSinfo, outfilename: str = 'output.html'):
     """Generates the html static page that will show up the results from the delay mapping.
     """
-    cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=10), cmap='RdYlGn')
-    cmap = colors.ListedColormap(['darkred', 'red', 'lightgreen', 'green'])
-    norm = colors.BoundaryNorm(boundaries=[3,4,5,10], ncolors=cmap.N, clip=False)
-    cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=8), cmap=cmap)
+    # cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=10), cmap='RdYlGn')
+    cmap0 = colors.ListedColormap(['darkred', 'red', 'lightgreen', 'green'])
+    norm = colors.BoundaryNorm(boundaries=[3,4,5,10], ncolors=cmap0.N, clip=False)
+    cmap = ScalarMappable(norm=colors.Normalize(vmin=3, vmax=8), cmap=cmap0)
     html = """
     <!DOCTYPE html>
     <html lang="en">
@@ -531,7 +565,7 @@ def write_html(lag_results: dict, refant: str, subbands: list[int], polarization
             if subband in lag_results[baseline] and pol in lag_results[baseline][subband]:
                 # print(f"\n\nkeys in lag_results: {lag_results.keys()=}\n{lag_results[baseline].keys()=}\n{lag_results[baseline][subband].keys()=}\n{lag_results[baseline][subband][pol].keys()=}")
                 snr = lag_results[baseline][subband][pol]['snr_p']
-                color = cmap.to_rgba(snr, norm=norm)
+                color = cmap.to_rgba(snr, norm=norm)  # type: ignore
                 hex_color = '#{:02x}{:02x}{:02x}BB'.format(int(color[0]*255), int(color[1]*255), int(color[2]*255))
                 html += f"""<td style="background-color: {hex_color};">
                         <a href="./plots/lag_spectrum_{refant.upper()}-{baseline.upper()}_SB{subband}.png">
