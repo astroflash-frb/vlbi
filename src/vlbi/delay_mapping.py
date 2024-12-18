@@ -267,7 +267,7 @@ def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8, snr_fit: f
     sum_weights = xcount*weights
     sum_weights2 = sum_weights*weights
     x = lag_peak/xcount*np.pi/2.0
-    snr_p = (np.pow(np.tan(x), 1.163) * np.sqrt(sum_weights/np.sqrt(sum_weights2/xcount)))
+    snr_p = (np.tan(x)**1.163 * np.sqrt(sum_weights/np.sqrt(sum_weights2/xcount)))
 
     if snr_p > snr_fit:
         popt, _ = curve_fit(gaussian_func, lags, lag_spec, p0=(lag_peak, lags_offset_p, 1.5))
@@ -278,8 +278,10 @@ def delay_snr(phases, weights, bandwidth_sb: float, padding: int = 8, snr_fit: f
 
     # Calculating delay
     # delay_p = (lags_offset_p/n_pad) / freq_resolution
-    delay_p = lags_offset_p / (2*bandwidth_sb)
-    delay_error_p = lags_error_p / (2*bandwidth_sb)
+    # delay_p = (lags_offset_p/n_pad) * 1/(bandwidth_sb/n_channels)
+    # delay_error_p = lags_error_p / (n_pad*bandwidth_sb/n_channels)
+    delay_p = (lags_offset_p/padding) / (2*bandwidth_sb)
+    delay_error_p = (lags_error_p/padding) / (2*bandwidth_sb)
     assert all([isinstance(q, float) for q in (snr_p, delay_p, lags_offset_p)]), \
            f"They all should be floats but are {snr_p=}, {delay_p=}, {lags_offset_p=}"
     return lags, lag_spec, snr_p, delay_p, delay_error_p, lags_offset_p, lags_error_p
@@ -431,7 +433,11 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
     ants1 = ms.getcol('ANTENNA1')
     ants2 = ms.getcol('ANTENNA2')
     spws = ms.getcol('DATA_DESC_ID')
-    phases = np.exp(1J*np.angle(ms.getcol('DATA')))
+    if 'CORRECTED_DATA' in ms.colnames():
+        phases = np.exp(1J*np.angle(ms.getcol('CORRECTED_DATA')))
+    else:
+        phases = np.exp(1J*np.angle(ms.getcol('DATA')))
+
     weights = ms.getcol('WEIGHT')
     flagged = ms.getcol('FLAG')
 
@@ -465,7 +471,7 @@ def main(msfile: str, refant: str = 'EF', baselines: Optional[list[str]] = None,
                 # if len(phases[pol,:, condition]) > 0:
                 if (phases[pol, :, condition] > 0.0).any():
                     results = delay_snr(phases[pol,:,condition].squeeze(), weights[pol,condition].squeeze(),
-                                        msinfo.bandwidth.to(u.Hz).value, padding=padding) # type: ignore
+                                        msinfo.bandwidth.to(u.Hz).value, padding=padding, snr_fit=snr) # type: ignore
                     lag_results[basel][a_spw][pol_str] = {key: result for result, key in \
                             zip(results, ('lags', 'lag_spec', 'snr_p', 'delay_p', 'delay_error_p',
                                           'lags_offset_p', 'lags_error_p'))}
@@ -581,6 +587,7 @@ def write_html(lag_results: dict, refant: str, subbands: list[int], polarization
 
     html += """
         </table>
+        <div style="height:500px;"></div>
         </div>
     </body>
     </html>
